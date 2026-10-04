@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ATRI 冷钱包 · BTC 签名器</title>
+<script type="importmap">
+{
+  "imports": {
+    "@bitcoinerlab/secp256k1": "https://esm.sh/@bitcoinerlab/secp256k1@2.0.0",
+    "bitcoinjs-lib": "https://esm.sh/bitcoinjs-lib@7.0.2",
+    "@scure/bip32": "https://esm.sh/@scure/bip32@1.3.2"
+  }
+}
+</script>
+<script type="module">
+import Secp256k1 from '@bitcoinerlab/secp256k1';
+import * as bitcoinjsLib from 'bitcoinjs-lib';
+import { HDKey } from '@scure/bip32';
+
+// 初始化 ECC 库
+bitcoinjsLib.initEccLib(Secp256k1);
+
+// 挂载到全局对象供其他脚本使用
+window.Secp256k1 = Secp256k1;
+window.bitcoinjsLib = bitcoinjsLib;
+window.HDKey = HDKey;
+
+console.log('✅ bitcoinjs-lib v7 + secp256k1 + scure-bip32 已加载');
+console.log('HDKey.fromMasterSeed:', typeof HDKey.fromMasterSeed);
+</script>
+<!-- 注：bip39 无浏览器打包版，改为用 WebCrypto 自实现 PBKDF2（见下方 mnemonicToSeed） -->
+<style>
+  :root { --bg:#0f1220; --card:#1a1f35; --accent:#f7931a; --accent2:#6bd5ff; --text:#e8ecff; --muted:#8892b8; --ok:#4ade80; --err:#ff6b6b; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; padding:16px; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:16px; padding:16px; margin-bottom:14px; box-shadow:0 4px 20px rgba(0,0,0,.3); }
+  .status { display:flex; align-items:center; gap:8px; font-size:14px; margin-bottom:12px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--err); }
+  .dot.on { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  button { border:none; border-radius:12px; padding:12px 16px; font-size:15px; font-weight:600; cursor:pointer; background:linear-gradient(135deg,var(--accent),#ffb347); color:#1a1200; width:100%; margin-top:8px; transition:transform .1s,opacity .2s; }
+  button:active { transform:scale(.97); }
+  button:disabled { opacity:.4; }
+  button.sec { background:linear-gradient(135deg,var(--accent2),#9be6ff); color:#06283d; }
+  button.ghost { background:#2a3050; color:var(--text); }
+  label { font-size:13px; color:var(--muted); display:block; margin:10px 0 4px; }
+  input, textarea { width:100%; padding:12px; border-radius:10px; border:1px solid #333a55; background:#0c0f1c; color:var(--text); font-size:15px; }
+  textarea { font-size:13px; resize:vertical; font-family:ui-monospace,monospace; }
+  input:focus, textarea:focus { outline:none; border-color:var(--accent); }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  .entry { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 0; border-bottom:1px solid #262c45; }
+  .entry:last-child { border-bottom:none; }
+  .entry .name { font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entry .del { background:transparent; color:var(--err); width:auto; font-size:20px; padding:4px 10px; margin:0; }
+  .log { background:#0c0f1c; border-radius:10px; padding:10px; font-family:ui-monospace,monospace; font-size:12px; color:var(--muted); max-height:180px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+  .tag { color:var(--accent2); }
+  .err { color:var(--err); } .ok { color:var(--ok); }
+  .hidden { display:none; }
+  .warn { background:#3a2a10; border:1px solid #7a5a20; border-radius:10px; padding:10px; font-size:12px; color:#ffd98a; margin-bottom:14px; }
+  .nav { display:flex; gap:8px; margin-bottom:14px; }
+  .nav a { flex:1; text-align:center; padding:10px; border-radius:10px; background:#232842; color:var(--muted); text-decoration:none; font-size:14px; }
+  .nav a.active { background:var(--accent); color:#1a1200; font-weight:700; }
+  .addr { font-family:ui-monospace,monospace; font-size:12px; color:var(--accent2); word-break:break-all; margin-top:6px; }
+</style>
+</head>
+<body>
+
+<h1>🦀 ATRI 冷钱包</h1>
+<div class="sub">BTC 离线签名器 · 私钥只进不出 · 我是高性能的嘛！</div>
+
+<div class="nav">
+  <a href="totp.html">🔑 TOTP 认证器</a>
+  <a href="wallet.html" class="active">₿ 冷钱包</a>
+</div>
+
+<div class="warn">
+  ⚠️ 安全提示：本页为教学/进阶 DIY 冷钱包。私钥在 ESP32 内加密存储且不可导出，
+  但 ESP32 无安全元件（Secure Element），不适合存放高价值资产。请勿在联网环境使用真实助记词。
+</div>
+
+<div class="card">
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">未连接</span></div>
+  <button id="btnConnect">🔗 连接设备</button>
+  <div id="passArea" class="hidden">
+    <input id="inPass" type="password" placeholder="设备密码（解锁钱包）" autocomplete="off">
+    <button id="btnUnlock" class="sec">🔓 解锁</button>
+  </div>
+</div>
+
+<div class="card" id="deriveCard">
+  <div class="sub" style="margin:0 0 6px">🌱 助记词派生（浏览器本地，助记词不上传）</div>
+  <label>BIP39 助记词（12/24 词，用空格分隔）</label>
+  <textarea id="wMnemonic" rows="2" placeholder="abandon abandon abandon ... about"></textarea>
+  <label>派生路径</label>
+  <input id="wPath" value="m/84'/0'/0'/0/0">
+  <div class="row">
+    <button id="btnDerive" class="sec">🌿 派生子私钥</button>
+  </div>
+  <div class="sub" id="deriveInfo" style="font-size:12px;margin-top:6px"></div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0 0 6px">🔐 私钥管理（导入后不可导出）</div>
+  <label>密钥标签</label>
+  <input id="wLabel" placeholder="我的BTC密钥">
+  <label>私钥 Hex（64 位，派生后自动填入）</label>
+  <input id="wPriv" placeholder="由上方派生，或手动填入">
+  <button id="btnImportPriv" class="sec">📥 导入私钥到设备</button>
+  <button id="btnListWallet" class="ghost">📋 查看钱包密钥</button>
+  <div id="walletBox" style="margin-top:10px"></div>
+</div>
+
+<div class="card hidden" id="txCard">
+  <div class="sub" style="margin:0 0 6px">💸 构造交易（PSBT）</div>
+  <label>收款地址</label>
+  <input id="txTo" placeholder="bc1q... / tb1q...（测试网用 tb1q）">
+  <label>金额（sats）</label>
+  <input id="txAmount" placeholder="10000">
+  <label>UTXO（txid:vout:value_sats:privkey_label）</label>
+  <input id="txUtxo" placeholder="txid:0:50000:我的BTC密钥">
+  <label>找零地址（可选，留空则无找零）</label>
+  <input id="txChange" placeholder="bc1q...">
+  <label>费率（sat/vB）</label>
+  <input id="txFee" value="10">
+  <button id="btnBuildTx" class="sec">🏗️ 构造并请求设备签名</button>
+  <button id="btnBroadcast" class="ghost">📡 广播到网络</button>
+  <div class="sub" id="txInfo" style="font-size:12px;margin-top:6px"></div>
+  <textarea id="txRaw" rows="3" readonly placeholder="签名后的原始交易 hex"></textarea>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0 0 6px">日志</div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+const SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const TX  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const CA_PUBKEY_B64 = "BO+1Mjj2ZeglAd76ArgCaujE0FdBr+TURI6nlaMaAYAN7pZN04F3yhqzxGhDalco5cGMqSdVtgUT9Tu4iFbG9Q0=";
+// 测试网：bc1 改成 tb1 网络。这里默认 bitcoin mainnet，可切换。
+let NETWORK = "bitcoin";
+
+let device, server, rxChar, txChar, rxBuf = "", pendingAsk = null;
+let trusted = false, authed = false, timer = null;
+
+const logEl = document.getElementById("log");
+function log(msg, cls="") {
+  const t = new Date().toLocaleTimeString("zh-CN");
+  logEl.innerHTML += `<div class="${cls}"><span class="tag">[${t}]</span> ${msg}</div>`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(t, on) {
+  document.getElementById("statusText").textContent = t;
+  document.getElementById("dot").className = "dot" + (on ? " on" : "");
+}
+function b64ToBytes(b64) { const b = atob(b64); const a = new Uint8Array(b.length); for (let i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
+function bytesToB64(b) { let s=""; b.forEach(x=>s+=String.fromCharCode(x)); return btoa(s); }
+function bytesToHexW(b) { return Array.from(b).map(x=>x.toString(16).padStart(2,"0")).join(""); }
+function hexToBytes(hex) { hex=hex.trim().replace(/^0x/,""); const a=new Uint8Array(hex.length/2); for(let i=0;i<a.length;i++) a[i]=parseInt(hex.substr(i*2,2),16); return a; }
+
+function onNotify(ev) {
+  rxBuf += new TextDecoder().decode(ev.target.value);
+  let idx;
+  while ((idx = rxBuf.indexOf("\n")) >= 0) {
+    const line = rxBuf.slice(0, idx); rxBuf = rxBuf.slice(idx+1);
+    if (line.length) handleReply(line);
+  }
+}
+
+function handleReply(line) {
+  if (pendingAsk) {
+    const hit = line.includes(pendingAsk.keyPrefix) || line.startsWith("OK ") || line.startsWith("ERR");
+    if (hit) {
+      const p = pendingAsk; pendingAsk = null; clearTimeout(p.timer);
+      p.resolve(line.startsWith("ERR") ? null : { raw: line });
+    }
+  }
+  if (line.startsWith("OK")) log("← " + line, "ok");
+  else if (line.startsWith("ERR")) log("← " + line, "err");
+  else log("← " + line);
+}
+
+async function send(cmd, logFilter) {
+  if (!rxChar) return;
+  log("→ " + (logFilter || cmd));
+  const full = cmd.endsWith("\n") ? cmd : cmd + "\n";
+  const data = new TextEncoder().encode(full);
+  const CHUNK = 20; let i = 0;
+  while (i < data.length) {
+    let end = Math.min(i + CHUNK, data.length);
+    while (end > i && end < data.length && (data[end] & 0xC0) === 0x80) end--;
+    const chunk = data.slice(i, end);
+    try { await rxChar.writeValueWithResponse(chunk); } catch(e) { await rxChar.writeValue(chunk); }
+    i = end;
+  }
+}
+function ask(cmd, keyPrefix, timeoutMs, logFilter) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { pendingAsk = null; resolve(null); }, timeoutMs || 3000);
+    pendingAsk = { resolve, keyPrefix, timer: t };
+    send(cmd, logFilter);
+  });
+}
+
+function gate() {
+  const ok = trusted && authed;
+  ["btnImportPriv","btnListWallet"].forEach(id => { const e=document.getElementById(id); if(e) e.disabled=!ok; });
+  document.getElementById("txCard").classList.toggle("hidden", !ok);
+}
+
+document.getElementById("btnConnect").onclick = async () => {
+  if (!navigator.bluetooth) { alert("需用 Chrome/Edge（支持 Web Bluetooth）"); return; }
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:"ATRI"}], optionalServices:[SVC] });
+    device.addEventListener("gattserverdisconnected", () => { setStatus("已断开", false); trusted=authed=false; gate(); });
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    rxChar = await svc.getCharacteristic(RX);
+    txChar = await svc.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener("characteristicvaluechanged", onNotify);
+    setStatus("已连接 " + device.name, true);
+    log("✅ 已连接，验证设备身份...", "ok");
+    await verifyDevice();
+  } catch(e) { log("❌ 连接失败: " + e.message, "err"); }
+};
+
+async function verifyDevice() {
+  try {
+    const certReply = await ask("GETCERT", "CERT:", 3000);
+    if (!certReply) { setStatus("设备无证书", false); return; }
+    const certB64 = certReply.raw.split("CERT:")[1].trim();
+    const cert = b64ToBytes(certB64);
+    const plen = (cert[0]<<8)|cert[1];
+    const payload = cert.slice(2, 2+plen);
+    const slen = (cert[2+plen]<<8)|cert[2+plen+1];
+    const sig = cert.slice(4+plen, 4+plen+slen);
+    const devicePub = payload.slice(1, 66);
+    const caPub = await crypto.subtle.importKey("raw", b64ToBytes(CA_PUBKEY_B64).slice(0,65),
+      { name:"ECDSA", namedCurve:"P-256" }, false, ["verify"]);
+    const okCert = await crypto.subtle.verify({name:"ECDSA",hash:"SHA-256"}, caPub, sig, payload);
+    if (!okCert) { setStatus("⚠️ 证书验签失败", false); log("❌ 证书验签失败！拒绝连接", "err"); return; }
+    const nonce = crypto.getRandomValues(new Uint8Array(32));
+    const authReply = await ask("AUTH " + bytesToB64(nonce), "SIG:", 3000);
+    if (!authReply) { setStatus("挑战无响应", false); return; }
+    const devKey = await crypto.subtle.importKey("raw", devicePub, {name:"ECDSA",namedCurve:"P-256"}, false, ["verify"]);
+    const okAuth = await crypto.subtle.verify({name:"ECDSA",hash:"SHA-256"}, devKey,
+      b64ToBytes(authReply.raw.split("SIG:")[1].trim()), nonce.buffer);
+    if (!okAuth) { setStatus("⚠️ 挑战响应失败", false); return; }
+    trusted = true;
+    setStatus("🔒 设备已验证", true);
+    log("🔒 设备身份验证通过", "ok");
+    document.getElementById("passArea").classList.remove("hidden");
+    const has = await ask("HASPASS", "pass ", 2000);
+    document.getElementById("btnUnlock").textContent = (has && /pass set/.test(has.raw)) ? "🔓 解锁" : "🔐 设置密码";
+    gate();
+  } catch(e) { log("❌ 验证异常: " + e.message, "err"); }
+}
+
+document.getElementById("btnUnlock").onclick = async () => {
+  const pw = document.getElementById("inPass").value;
+  if (!pw) { alert("请输入密码"); return; }
+  const has = document.getElementById("btnUnlock").textContent.includes("解锁");
+  let r;
+  if (has) r = await ask("AUTHPASS " + pw, "auth ok", 3000);
+  else r = await ask("SETPASS " + pw, "pass set", 3000);
+  if (r) {
+    authed = true;
+    document.getElementById("inPass").value = "";
+    log("✅ 已解锁", "ok");
+    gate();
+  } else { alert("密码错误/设置失败"); log("❌ 解锁失败", "err"); }
+};
+
+// --- 助记词派生（自实现 BIP39 种子 + bitcoinjs BIP32，无需 bip39 库） ---
+// BIP39 种子 = PBKDF2-HMAC-SHA512(密码=助记词, 盐="mnemonic"+passphrase, 2048轮, 64字节)
+async function mnemonicToSeed(mnemonic, passphrase = "") {
+  const enc = new TextEncoder();
+  const mn = mnemonic.normalize("NFKD");
+  const key = await crypto.subtle.importKey("raw", enc.encode(mn), "PBKDF2", false, ["deriveBits"]);
+  const salt = enc.encode("mnemonic" + (passphrase || "").normalize("NFKD"));
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 2048, hash: "SHA-512" }, key, 512);
+  return new Uint8Array(bits);
+}
+
+document.getElementById("btnDerive").onclick = async () => {
+  const mn = document.getElementById("wMnemonic").value.trim().replace(/\s+/g, " ");
+  const path = document.getElementById("wPath").value.trim();
+  if (!mn) { alert("请输入助记词"); return; }
+  try {
+    if (typeof bitcoinjsLib === "undefined") throw new Error("bitcoinjs 库未加载（需联网）");
+    if (typeof HDKey === "undefined") throw new Error("HDKey 库未加载（需联网）");
+    const words = mn.split(" ");
+    if (![12,15,18,21,24].includes(words.length)) throw new Error(`助记词应为 12/15/18/21/24 词，当前 ${words.length} 词`);
+    const seed = await mnemonicToSeed(mn);
+
+    console.log('Seed length:', seed.length);
+    console.log('First 16 bytes:', Array.from(seed.slice(0, 16)).map(b => b.toString(16).padStart(2,'0')).join(''));
+
+    // 使用 scure-bip32（纯 JavaScript，无需 Buffer）
+    const root = HDKey.fromMasterSeed(seed);
+    const child = root.derive(path);
+
+    if (!child.privateKey) throw new Error("无法派生私钥（路径错误？）");
+
+    const priv = child.privateKey;
+    const hex = Array.from(priv).map(b => b.toString(16).padStart(2, '0')).join('');
+    document.getElementById("wPriv").value = hex;
+
+    const { address } = bitcoinjsLib.payments.p2wpkh({ pubkey: child.publicKey, network: bitcoinjsLib.networks[NETWORK] });
+    document.getElementById("deriveInfo").innerHTML =
+      `✓ 已派生（路径 ${path}）<div class="addr">地址: ${address}</div>`;
+    log("🌿 已派生子私钥 + 地址（本地，未上传）", "ok");
+    document.getElementById("wMnemonic").value = "";
+  } catch(e) { alert("派生失败: " + e.message); console.error(e); }
+};
+
+document.getElementById("btnImportPriv").onclick = async () => {
+  const label = document.getElementById("wLabel").value.trim();
+  const hex = document.getElementById("wPriv").value.trim().replace(/\s/g,"");
+  if (!label || !hex) { alert("请填标签和私钥 hex"); return; }
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) { alert("私钥需 64 位 hex"); return; }
+  if (!confirm("⚠️ 将私钥导入设备（只进不出，永不导出）。继续？")) return;
+  const r = await ask(`IMPORTPRIV ${label} ${hex}`, "imported", 4000);
+  if (r) { log("✅ 私钥已导入设备（不可导出）", "ok"); document.getElementById("wPriv").value=""; listWallet(); }
+  else log("❌ 导入失败", "err");
+};
+
+document.getElementById("btnListWallet").onclick = () => listWallet();
+async function listWallet() {
+  const r = await ask("LISTWALLET", "keys:", 3000);
+  const box = document.getElementById("walletBox");
+  if (!r) { box.innerHTML = '<div class="sub">无密钥或未解锁</div>'; return; }
+  const m = r.raw.match(/keys:\s*([\s\S]*)/);
+  const names = (m ? m[1] : "").split(";").map(s=>s.trim()).filter(Boolean);
+  if (!names.length) { box.innerHTML = '<div class="sub">（空）</div>'; return; }
+  box.innerHTML = names.map(n => `
+    <div class="entry"><span class="name">${n}</span>
+      <button class="ghost" data-wpub="${n}" style="width:auto;margin:0;padding:6px 10px">公钥</button>
+      <button class="del" data-wdel="${n}">🗑️</button></div>`).join("");
+  box.querySelectorAll("button[data-wdel]").forEach(b => b.onclick = async () => {
+    if (confirm(`删除 ${b.dataset.wdel}？`)) { await ask("DELWALLET " + b.dataset.wdel, "deleted", 3000); listWallet(); }
+  });
+  box.querySelectorAll("button[data-wpub]").forEach(b => b.onclick = async () => {
+    const rr = await ask("GETWALLETPUB " + b.dataset.wpub, "PUBKEY", 3000);
+    if (rr) alert(`公钥(${b.dataset.wpub}):\n${rr.raw.split("PUBKEY:")[1].trim()}`);
+  });
+}
+
+// --- 构造单输入 P2WPKH 交易，请求设备签名 ---
+document.getElementById("btnBuildTx").onclick = async () => {
+  try {
+    if (typeof bitcoinjsLib === "undefined") throw new Error("bitcoinjs 库未加载");
+    if (typeof Secp256k1 !== "undefined") bitcoinjsLib.initEccLib(Secp256k1);
+    const to = document.getElementById("txTo").value.trim();
+    const amount = parseInt(document.getElementById("txAmount").value);
+    const utxoStr = document.getElementById("txUtxo").value.trim();
+    const changeAddr = document.getElementById("txChange").value.trim();
+    const feeRate = parseInt(document.getElementById("txFee").value) || 10;
+    if (!to || !amount || !utxoStr) { alert("请填收款地址、金额、UTXO"); return; }
+    const [txid, voutStr, valStr, label] = utxoStr.split(":");
+    const vout = parseInt(voutStr), value = parseInt(valStr);
+    if (!label) { alert("UTXO 格式应为 txid:vout:value:密钥标签"); return; }
+
+    const net = bitcoinjsLib.networks[NETWORK];
+    // 取设备里对应标签的公钥，算 scriptPubKey
+    const pkr = await ask("GETWALLETPUB " + label, "PUBKEY", 3000);
+    if (!pkr) { alert("取公钥失败（未解锁？标签对吗）"); return; }
+    const pubHost = pkr.raw.split("PUBKEY:")[1].trim();
+    const pubBuf = Buffer.from(pubHost, "base64"); // 33B compressed
+    const p2wpkh = bitcoinjsLib.payments.p2wpkh({ pubkey: pubBuf, network: net });
+
+    const psbt = new bitcoinjsLib.Psbt({ network: net });
+    psbt.addInput({
+      hash: txid, index: vout,
+      witnessUtxo: { script: p2wpkh.output, value: value },
+    });
+    psbt.addOutput({ address: to, value: amount });
+    let changeValue = value - amount - Math.ceil(feeRate * 110); // 粗略估算手续费
+    if (changeAddr && changeValue > 546) {
+      psbt.addOutput({ address: changeAddr, value: changeValue });
+    }
+
+    // 计算 sighash（input 0），发给设备签名
+    const signer = { publicKey: pubBuf, sign: () => { throw new Error("no"); } };
+    const sigHash = psbt.getHashForSig(0, null, signer); // Buffer
+    log("→ SIGNHASH " + label + " <hash>");
+    const sr = await ask(`SIGNHASH ${label} ${Buffer.from(sigHash).toString("base64")}`, "SIG:", 4000);
+    if (!sr) { alert("设备签名失败"); return; }
+    const rawSig = Buffer.from(sr.raw.split("SIG:")[1].trim(), "base64"); // 64B r||s
+
+    // 转 DER
+    const r = rawSig.slice(0,32), s = rawSig.slice(32,64);
+    const derSig = bitcoinjsLib.script.signature.encode(
+      { r: BigInt("0x"+r.toString("hex")), s: BigInt("0x"+s.toString("hex")) }, 0x01);
+    psbt.updateInput(0, { partialSig: [{ pubkey: pubBuf, signature: derSig }] });
+    psbt.finalizeAllInputs();
+    const rawTx = psbt.extractTransaction().toHex();
+    document.getElementById("txRaw").value = rawTx;
+    document.getElementById("txInfo").textContent = "✓ 已签名，可广播";
+    log("✅ 交易已签名（原始 hex 已生成）", "ok");
+  } catch(e) { alert("构造失败: " + e.message); log("❌ " + e.message, "err"); }
+};
+
+document.getElementById("btnBroadcast").onclick = async () => {
+  const raw = document.getElementById("txRaw").value.trim();
+  if (!raw) { alert("先构造并签名交易"); return; }
+  const url = NETWORK === "bitcoin"
+    ? "https://mempool.space/api/tx"
+    : "https://mempool.space/testnet/api/tx";
+  try {
+    log("📡 广播中...");
+    const res = await fetch(url, { method:"POST", body: raw });
+    const txt = await res.text();
+    if (res.ok) { document.getElementById("txInfo").textContent = "TXID: " + txt; log("✅ 广播成功: " + txt, "ok"); }
+    else { document.getElementById("txInfo").textContent = "失败: " + txt; log("❌ 广播失败: " + txt, "err"); }
+  } catch(e) { log("❌ 广播异常: " + e.message, "err"); }
+};
+</script>
+</body>
+</html>

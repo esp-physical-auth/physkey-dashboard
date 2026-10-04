@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ATRI TOTP 验证器</title>
+<style>
+  :root {
+    --bg: #0f1220;
+    --card: #1a1f35;
+    --accent: #ff6b9d;
+    --accent2: #6bd5ff;
+    --text: #e8ecff;
+    --muted: #8892b8;
+    --ok: #4ade80;
+    --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .card {
+    background: var(--card); border-radius: 16px; padding: 16px;
+    margin-bottom: 14px; box-shadow: 0 4px 20px rgba(0,0,0,.3);
+  }
+  .status {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; margin-bottom: 12px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  button {
+    border: none; border-radius: 12px; padding: 12px 16px;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), #ff9bc0);
+    color: #fff; width: 100%; margin-top: 8px;
+    transition: transform .1s, opacity .2s;
+  }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .4; }
+  button.sec { background: linear-gradient(135deg, var(--accent2), #9be6ff); color: #06283d; }
+  button.ghost { background: #2a3050; color: var(--text); }
+  label { font-size: 13px; color: var(--muted); display: block; margin: 10px 0 4px; }
+  input {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #333a55;
+    background: #0c0f1c; color: var(--text); font-size: 15px;
+  }
+  input:focus { outline: none; border-color: var(--accent2); }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .code {
+    font-size: 40px; font-weight: 700; letter-spacing: 4px;
+    text-align: center; color: var(--accent2);
+    font-family: ui-monospace, Menlo, monospace; margin: 8px 0;
+  }
+  .code small { font-size: 14px; color: var(--muted); letter-spacing: 0; display: block; }
+  .progress {
+    height: 5px; background: #2a3050; border-radius: 3px; overflow: hidden; margin-top: 8px;
+  }
+  .progress > i { display: block; height: 100%; background: var(--accent); transition: width 1s linear; }
+  .entry {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 8px; padding: 10px 0; border-bottom: 1px solid #262c45;
+  }
+  .entry:last-child { border-bottom: none; }
+  .entry .name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry .val { font-family: ui-monospace, monospace; color: var(--accent2); font-size: 20px; letter-spacing: 1px; }
+  .entry .del {
+    background: transparent; color: var(--err); width: auto;
+    font-size: 20px; padding: 4px 10px; margin: 0;
+  }
+  .entry .get {
+    background: transparent; width: auto; font-size: 18px;
+    padding: 4px 8px; margin: 0;
+  }
+  .log {
+    background: #0c0f1c; border-radius: 10px; padding: 10px;
+    font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted);
+    max-height: 150px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .tag { color: var(--accent2); }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .hidden { display: none; }
+  .crab { font-size: 22px; }
+</style>
+</head>
+<body>
+
+<h1>🦀 ATRI TOTP 验证器</h1>
+<div class="sub">ESP32-C5 蓝牙硬件验证码 · 我是高性能的嘛！</div>
+
+<div class="nav" style="display:flex;gap:8px;margin-bottom:14px">
+  <a href="totp.html" style="flex:1;text-align:center;padding:10px;border-radius:10px;background:var(--accent);color:#fff;text-decoration:none;font-size:14px;font-weight:700">🔑 TOTP 认证器</a>
+  <a href="wallet.html" style="flex:1;text-align:center;padding:10px;border-radius:10px;background:#232842;color:var(--muted);text-decoration:none;font-size:14px">₿ 冷钱包</a>
+</div>
+
+<div class="card">
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="statusText">未连接</span>
+  </div>
+  <button id="btnConnect">🔗 连接设备</button>
+</div>
+
+<div class="card hidden" id="caBanner"></div>
+
+<div class="card hidden" id="passBox">
+  <div class="sub" style="margin:0 0 6px">🔐 访问密码</div>
+  <div id="passSetRow" data-set="0">
+    <input id="inPass" type="password" placeholder="输入密码" autocomplete="off">
+    <button id="btnPassAuth">🔐 设置密码</button>
+  </div>
+  <div class="sub" id="passHint" style="font-size:12px;margin-top:6px">首次连接请设置一个密码；之后输入同一密码解锁。未解锁时所有敏感操作都会被设备拒绝。</div>
+</div>
+
+<div class="card">
+  <button id="btnTime" class="sec" disabled>⏰ 授时（发送手机时间）</button>
+</div>
+
+<div class="card">
+  <label>账号名（如 github / steam:我的号）</label>
+  <input id="inName" placeholder="github" autocomplete="off">
+  <label>密钥（Base32 / Steam JSON / otpauth 链接，自动识别）</label>
+  <textarea id="inSecret" placeholder="可直接粘贴：\n- Base32 密钥：JBSWY3DPEHPK3PXP\n- Steam JSON：{...shared_secret...}\n- otpauth://totp/..." rows="3" style="width:100%;padding:12px;border-radius:10px;border:1px solid #333a55;background:#0c0f1c;color:var(--text);font-size:14px;resize:vertical"></textarea>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
+    <input type="checkbox" id="chkSteam" style="width:auto">
+    <span>这是 Steam 令牌（5 位字母码）</span>
+  </label>
+  <div class="row">
+    <button id="btnAdd" class="sec" disabled>➕ 添加密钥</button>
+  </div>
+  <button id="btnGet" class="ghost" disabled>🔑 获取验证码</button>
+</div>
+
+<div class="card hidden" id="codeCard">
+  <div class="code" id="codeVal">------<small id="codeInfo"></small></div>
+  <div class="progress"><i id="prog" style="width:0%"></i></div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="btnList" class="sec" disabled>📋 查看全部</button>
+  </div>
+  <div id="listBox" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0 0 6px">🔑 Passkey 凭证（WebAuthn）</div>
+  <div class="row">
+    <button id="btnWaList" class="sec" disabled>🔑 刷新凭证</button>
+    <button id="btnWaWipe" class="ghost" style="color:var(--err)" disabled>🗑️ 清空全部</button>
+  </div>
+  <div id="waListBox" style="margin-top:10px"><div class="sub">（连接并解锁后点「刷新凭证」）</div></div>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0 0 6px">📦 备份（JSON）</div>
+  <div class="row">
+    <button id="btnExport" class="sec" disabled>📤 导出</button>
+    <button id="btnImport" class="ghost" disabled>📥 导入</button>
+  </div>
+  <input type="file" id="fileImport" accept=".json,application/json" class="hidden">
+  <div class="sub" style="font-size:12px;margin-top:6px">导出为 JSON 备份；导入兼容 Cloudflare TOTP / 标准 TOTP 格式。</div>
+</div>
+
+<div class="card hidden" id="privilegeBox">
+  <div class="sub" style="margin:0 0 6px">⚙️ 特权操作（可信设备）</div>
+  <button id="btnResetPass" class="ghost">🔁 重置密码</button>
+  <button id="btnWipe" class="ghost" style="color:var(--err)">🗑️ 清除全部 TOTP（忘记密码时用，无需解锁）</button>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin:0 0 6px">日志</div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+const SVC  = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const RX   = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // write
+const TX   = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // notify
+
+let device, server, rxChar, txChar;
+let rxBuf = "";
+let timer = null;
+const logEl = document.getElementById("log");
+
+// ---- CA 信任链配置 ----
+// 电脑 CA 公钥（P-256 未压缩点，base64，65 字节）。
+// 由 tools/atri-ca.py init 生成后用 `atri-ca.py capub` 打印，粘到这里。
+// 公钥公开安全：没有 CA 私钥就签不出能被验过的证书。
+const CA_PUBKEY_B64 = "BO+1Mjj2ZeglAd76ArgCaujE0FdBr+TURI6nlaMaAYAN7pZN04F3yhqzxGhDalco5cGMqSdVtgUT9Tu4iFbG9Q0=";
+
+let trusted = false;      // 设备是否已通过验签
+let authed = false;       // 密码是否已通过
+
+function log(msg, cls="") {
+  const t = new Date().toLocaleTimeString("zh-CN");
+  logEl.innerHTML += `<div class="${cls}"><span class="tag">[${t}]</span> ${msg}</div>`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text, on) {
+  document.getElementById("statusText").textContent = text;
+  document.getElementById("dot").className = "dot" + (on ? " on" : "");
+}
+
+function enableBtns(on) {
+  ["btnTime","btnAdd","btnGet","btnList","btnExport","btnImport","btnWaList","btnWaWipe"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !(on && trusted && authed);
+  });
+}
+
+document.getElementById("btnConnect").onclick = async () => {
+  if (!navigator.bluetooth) {
+    log("❌ 此浏览器不支持 Web Bluetooth，请用安卓 Chrome / Edge", "err");
+    alert("浏览器不支持 Web Bluetooth，请用安卓 Chrome 或 Edge 打开本页");
+    return;
+  }
+  try {
+    log("扫描设备...");
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "ATRI" }],
+      optionalServices: [SVC]
+    });
+    device.addEventListener("gattserverdisconnected", onDisconnect);
+    log(`找到 ${device.name}，连接中...`);
+    server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    rxChar = await svc.getCharacteristic(RX);
+    txChar = await svc.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener("characteristicvaluechanged", onNotify);
+    setStatus("已连接 " + device.name, true);
+    log("✅ 已连接，开始验证设备身份...", "ok");
+    // 信任链握手：验签设备证书 + 挑战响应
+    await verifyDevice();
+  } catch (e) {
+    log("❌ 连接失败: " + e.message, "err");
+  }
+};
+
+// ---- CA 信任链：验签设备 + 挑战响应 ----
+async function verifyDevice() {
+  try {
+    // 1. 取设备证书
+    const certReply = await ask("GETCERT", "CERT:", 3000);
+    if (!certReply) {
+      trusted = false;
+      setTrust(false, "设备未安装证书（需先用电脑 CA 签发）");
+      return false;
+    }
+    const certB64 = certReply.raw.split("CERT:")[1].trim();
+    const cert = base64ToBytes(certB64);
+    // 证书格式: len(2) || payload || siglen(2) || sig(64)
+    const plen = (cert[0] << 8) | cert[1];
+    const payload = cert.slice(2, 2 + plen);
+    const slen = (cert[2 + plen] << 8) | cert[2 + plen + 1];
+    const sig = cert.slice(4 + plen, 4 + plen + slen);
+    const devicePub = payload.slice(1, 66); // 0x04||X||Y
+
+    // 2. 用 CA 公钥验签证书
+    const caPub = await crypto.subtle.importKey(
+      "raw", base64ToBytes(CA_PUBKEY_B64).slice(0, 65),
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    const okCert = await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" }, caPub, sig, payload);
+    if (!okCert) {
+      trusted = false;
+      setTrust(false, "证书验签失败！非本 CA 签发的设备（可能被伪造）");
+      log("❌ 证书验签失败！拒绝连接（防中间人）", "err");
+      return false;
+    }
+
+    // 3. 挑战-响应：验证设备确实持有私钥
+    const nonce = crypto.getRandomValues(new Uint8Array(32));
+    const authReply = await ask("AUTH " + bytesToBase64(nonce), "SIG:", 3000);
+    if (!authReply) {
+      trusted = false;
+      setTrust(false, "挑战响应无回应");
+      return false;
+    }
+    const sigB64 = authReply.raw.split("SIG:")[1].trim();
+    const devKey = await crypto.subtle.importKey(
+      "raw", devicePub, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    // 诊断：打印网页验签时实际使用的字节
+    log("🔍 pub=" + bytesToHex(devicePub));
+    log("🔍 nonce=" + bytesToHex(nonce));
+    log("🔍 sig=" + bytesToHex(base64ToBytes(sigB64)));
+    const okAuth = await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" }, devKey,
+      base64ToBytes(sigB64), nonce.buffer);
+    if (!okAuth) {
+      trusted = false;
+      setTrust(false, "挑战响应验签失败！");
+      log("❌ 挑战响应失败，设备可能伪造", "err");
+      return false;
+    }
+
+    // 4. 设备可信
+    trusted = true;
+    log("🔒 设备身份验证通过（CA 验签 + 挑战响应）", "ok");
+    document.getElementById("caBanner").classList.remove("hidden");
+    document.getElementById("caBanner").className = "card ok-banner";
+
+    // 5. 查询密码是否已设置，决定 UI 显示哪种模式
+    const passReply = await ask("HASPASS", "pass ", 2000);
+    const passSet = passReply && passReply.raw && passReply.raw.includes("pass set");
+    document.getElementById("passSetRow").dataset.set = passSet ? "1" : "0";
+    document.getElementById("btnPassAuth").textContent = passSet ? "🔓 解锁" : "🔐 设置密码";
+    document.getElementById("passHint").textContent = passSet
+      ? "设备已设置密码，输入密码解锁。忘记密码？可用下方“清除全部 TOTP”重置数据。"
+      : "设备尚未设置密码，请先设置一个。";
+
+    updateGating();
+    return true;
+  } catch (e) {
+    trusted = false;
+    setTrust(false, "验证异常: " + e.message);
+    log("❌ 信任链验证异常: " + e.message, "err");
+    return false;
+  }
+}
+
+function setTrust(ok, msg) {
+  document.getElementById("caBanner").classList.remove("hidden");
+  const b = document.getElementById("caBanner");
+  b.className = "card " + (ok ? "ok-banner" : "err-banner");
+  b.innerHTML = (ok ? "🔒 " : "⚠️ ") + msg;
+  if (!ok) log("⚠️ " + msg, "err");
+}
+
+// 待回复的请求：匹配到 keyPrefix 时 resolve
+let pendingAsk = null;
+// 命令串行队列：保证同一时间只有一条命令在飞，避免回复错位
+let cmdQueue = Promise.resolve();
+function runSerial(fn) {
+  const next = cmdQueue.then(fn, fn);
+  // 队列链不断，错误不阻断后续
+  cmdQueue = next.catch(() => {});
+  return next;
+}
+function ask(cmd, keyPrefix, timeoutMs, logFilter) {
+  return runSerial(() => new Promise((resolve) => {
+    const t = setTimeout(() => { if (pendingAsk && pendingAsk.resolve===resolve) pendingAsk = null; resolve(null); }, timeoutMs || 3000);
+    pendingAsk = { resolve, keyPrefix, timer: t };
+    send(cmd, logFilter);
+    // 收到回复后等一小段，再放行下一条
+    const orig = resolve;
+    pendingAsk.resolve = (v) => { orig(v); };
+  }));
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+function bytesToBase64(bytes) {
+  let bin = "";
+  bytes.forEach(b => bin += String.fromCharCode(b));
+  return btoa(bin);
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// 根据可信/密码状态启用按钮
+function updateGating() {
+  const t = authenticated || trusted === false ? trusted : trusted; // 需先可信
+  ["btnTime","btnAdd","btnGet","btnList","btnExport","btnImport","btnWaList","btnWaWipe"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !(trusted && authed);
+  });
+  document.getElementById("passBox").classList.toggle("hidden", !trusted);
+  // 特权卡只要“设备可信”就显示（清除全部 TOTP 是忘记密码时的救命键，不能锁在解锁之后）
+  const priv = document.getElementById("privilegeBox");
+  if (priv) priv.classList.toggle("hidden", !trusted);
+  // 但“重置密码”需要先解锁才能显示可用
+  const rp = document.getElementById("btnResetPass");
+  if (rp) rp.disabled = !(trusted && authed);
+}
+
+let authenticated = false;
+
+function onDisconnect() {
+  setStatus("已断开", false);
+  enableBtns(false);
+  log("⚠️ 设备已断开", "err");
+}
+
+function onNotify(ev) {
+  const chunk = new TextDecoder().decode(ev.target.value);
+  rxBuf += chunk;
+  // 回复以 \n 结尾才算一条完整消息
+  let idx;
+  while ((idx = rxBuf.indexOf("\n")) >= 0) {
+    const line = rxBuf.slice(0, idx);
+    rxBuf = rxBuf.slice(idx + 1);
+    if (line.length) handleReply(line);
+  }
+}
+
+async function send(cmd, logFilter) {
+  if (!rxChar) return;
+  log("→ " + (logFilter ? logFilter : cmd));
+  // 长度前缀协议：命令体加 '\n'，总长度（含 '\n'）用 4 位十六进制前缀标明。
+  // 设备按长度收齐再执行，彻底避免 BLE 分片错乱。
+  const body = cmd.endsWith("\n") ? cmd : cmd + "\n";
+  const bodyBytes = new TextEncoder().encode(body);
+  const lenHex = bodyBytes.length.toString(16).padStart(4, "0");
+  const full = lenHex + body;
+  const data = new TextEncoder().encode(full);
+  // 按 20 字节分片，且不在 UTF-8 多字节字符中间切开
+  const CHUNK = 20;
+  let i = 0;
+  while (i < data.length) {
+    let end = Math.min(i + CHUNK, data.length);
+    while (end > i && end < data.length && (data[end] & 0xC0) === 0x80) {
+      end--;
+    }
+    const chunk = data.slice(i, end);
+    try {
+      await rxChar.writeValueWithResponse(chunk);
+    } catch (e) {
+      await rxChar.writeValue(chunk);
+    }
+    i = end;
+    // 片间小延时，让 BLE 栈消化，避免粘包/丢片
+    if (i < data.length) await new Promise(r => setTimeout(r, 25));
+  }
+}
+
+function handleReply(line) {
+  // 先分配给待回复请求（验签握手等）
+  if (pendingAsk) {
+    const pfx = pendingAsk.keyPrefix;
+    const hit = line.includes(pfx) || line.startsWith("OK ") || line.startsWith("ERR");
+    if (hit) {
+      const p = pendingAsk; pendingAsk = null;
+      clearTimeout(p.timer);
+      p.resolve(line.startsWith("ERR") ? null : { raw: line });
+    }
+  }
+  if (line.startsWith("OK")) log("← " + line, "ok");
+  else if (line.startsWith("ERR")) log("← " + line, "err");
+  else log("← " + line);
+
+  // DUMP 导出：收集每行 ITEM|name|secret|type|digits|period
+  if (dumpLines !== null && line.startsWith("ITEM|")) {
+    dumpLines.push(line);
+    return;
+  }
+  if (dumpLines !== null && /^OK\s+dumped\s+\d+/.test(line)) {
+    return; // 结束标记，由 collectDump 的超时处理
+  }
+
+  // 验证码：标准 TOTP 6-8 位数字，或 Steam 5 位字母数字
+  // 例：OK github: 123456 (valid 12s) / OK steam1: NGH95 (valid 17s)
+  let m = line.match(/^OK\s+(\S+):\s+([A-Z0-9]{5,8})\s+\(valid\s+(\d+)s\)/);
+  if (m) {
+    codeCache[m[1]] = m[2];
+    // 更新列表里对应单元格
+    const cell = document.querySelector(`.val[data-name="${m[1]}"]`);
+    if (cell) cell.textContent = m[2];
+    // 如果这个码是主卡片请求的，也更新主卡片
+    if (activeName === m[1]) showCode(m[2], m[1], parseInt(m[3]));
+    scheduleAutoRefresh(m[1], parseInt(m[3]));
+    return;
+  }
+
+  // ---- Passkey 凭证列表：每行 id<TAB>rp<TAB>user，最后 OK N credentials ----
+  if (pendingWaList !== null && line.includes("\t")) {
+    pendingWaList.push(line);
+    return;
+  }
+  if (/^OK\s+(\d+)\s+credentials/.test(line)) {
+    renderWaList(pendingWaList || []);
+    pendingWaList = null;
+    return;
+  }
+
+  // 列表头： OK <n> entries:  随后一行是 name1;name2;
+  m = line.match(/^OK\s+(\d+)\s+entries:?/);
+  if (m) { pendingList = []; return; }
+  if (pendingList !== null && line.trim()) {
+    const names = line.split(";").map(s => s.trim()).filter(Boolean);
+    renderList(names);
+    pendingList = null;
+    return;
+  }
+
+  // 添加成功 → 清空输入框 + 刷新列表
+  if (/^OK added/.test(line)) {
+    document.getElementById("inName").value = "";
+    document.getElementById("inSecret").value = "";
+    refreshList();
+    return;
+  }
+  // 删除成功 → 刷新列表
+  if (/^OK deleted/.test(line)) {
+    refreshList();
+    return;
+  }
+}
+
+let pendingList = null;
+let pendingWaList = null;   // 收集 WA_LIST 返回的凭证行
+let busy = false;   // 导入/批量操作中，暂停自动刷新，避免命令队列冲突
+
+function refreshList() {
+  if (busy) return;
+  pendingList = [];
+  send("LIST");
+}
+
+// ---- 列表渲染 ----
+const codeCache = {};
+let activeName = null;   // 主卡片当前显示的名字
+function renderList(items) {
+  const box = document.getElementById("listBox");
+  if (!items.length) { box.innerHTML = '<div class="sub">（还没有任何密钥）</div>'; return; }
+  box.innerHTML = items.map(name => `
+    <div class="entry">
+      <span class="name">${name}</span>
+      <span class="val" data-name="${name}">${codeCache[name] || "--"}</span>
+      <button class="ghost" data-get="${name}" style="width:auto;margin:0;padding:8px 12px">🔑</button>
+      <button class="del" data-del="${name}">🗑️</button>
+    </div>`).join("");
+  box.querySelectorAll("button[data-del]").forEach(btn => {
+    btn.onclick = () => send("DEL " + btn.dataset.del);
+  });
+  box.querySelectorAll("button[data-get]").forEach(btn => {
+    btn.onclick = () => { activeName = btn.dataset.get; send("GET " + btn.dataset.get); };
+  });
+  // 自动拉取每个账号的验证码
+  items.forEach((name, i) => setTimeout(() => {
+    if (busy) return;   // 导入/批量操作中不自动查
+    scheduleAutoRefreshSilent(name);
+    send("GET " + name);
+  }, 300 * i));
+}
+
+// 主卡片显示验证码 + 进度
+function showCode(code, name, remain) {
+  document.getElementById("codeCard").classList.remove("hidden");
+  document.getElementById("codeVal").firstChild.textContent = code;
+  document.getElementById("codeInfo").textContent = `${name} · 剩余 ${remain} 秒`;
+  startProgress(remain);
+}
+
+function startProgress(remain) {
+  const bar = document.getElementById("prog");
+  if (timer) clearInterval(timer);
+  let left = remain || 30;
+  bar.style.width = (left / 30 * 100) + "%";
+  timer = setInterval(() => {
+    left = Math.max(0, left - 1);
+    bar.style.width = (left / 30 * 100) + "%";
+    if (left <= 0) {
+      clearInterval(timer);
+      if (activeName) send("GET " + activeName);
+    }
+  }, 1000);
+}
+
+// 到期自动刷新列表里的码（静默）
+const refreshTimers = {};
+function scheduleAutoRefresh(name, remain) {
+  scheduleAutoRefreshSilent(name, remain);
+}
+function scheduleAutoRefreshSilent(name, remain) {
+  if (busy) return;
+  if (!remain) remain = 30;
+  if (refreshTimers[name]) clearTimeout(refreshTimers[name]);
+  refreshTimers[name] = setTimeout(() => { refreshTimers[name] = null; if (busy) return; send("GET " + name); }, remain * 1000);
+}
+
+// ---- 按钮 ----
+document.getElementById("btnTime").onclick = () => {
+  const ts = Math.floor(Date.now() / 1000);
+  send("TIME " + ts);
+};
+
+document.getElementById("btnAdd").onclick = () => {
+  let name = document.getElementById("inName").value.trim();
+  let secret = document.getElementById("inSecret").value.trim();
+  let isSteam = document.getElementById("chkSteam").checked;
+  if (!secret) { alert("请填写密钥"); return; }
+
+  // 自动识别输入格式
+  const parsed = parseSecretInput(secret);
+  if (parsed.kind === "steam") isSteam = true;
+  if (parsed.kind === "otpauth" && /Steam/i.test(parsed.issuer || "")) isSteam = true;
+
+  if (parsed.name && !name) name = parsed.name;
+  secret = parsed.secret;
+  if (!name) { alert("请填写账号名"); return; }
+
+  const finalName = isSteam && !/^steam:/i.test(name) ? "steam:" + name : name;
+  send(`ADD ${finalName} ${secret}`);
+};
+
+// 解析用户粘贴的多种密钥格式，返回 {kind, name, secret, issuer}
+function parseSecretInput(raw) {
+  const s = raw.trim();
+  // 1) JSON（Steam 导出）
+  if (s.startsWith("{")) {
+    try {
+      const j = JSON.parse(s);
+      // 可能是 {"accounts":{...}} 或直接的账户对象
+      let acc = j;
+      if (j.accounts) {
+        const keys = Object.keys(j.accounts);
+        if (keys.length) acc = j.accounts[keys[0]];
+      }
+      if (acc.shared_secret) {
+        return { kind: "steam", name: acc.account_name || "steam", secret: acc.shared_secret };
+      }
+    } catch (e) { /* 忽略，继续其他格式 */ }
+  }
+  // 2) otpauth:// 链接
+  if (/^otpauth:\/\//i.test(s)) {
+    try {
+      const u = new URL(s);
+      const secret = u.searchParams.get("secret") || "";
+      const issuer = u.searchParams.get("issuer") || "";
+      let name = decodeURIComponent(u.pathname.replace(/^\/totp\//, ""));
+      name = name.split(":").pop(); // 去掉 "Steam:" 前缀
+      return { kind: "otpauth", name, issuer, secret };
+    } catch (e) { return { kind: "raw", secret: s }; }
+  }
+  // 3) 原始密钥（base32 或 base64）
+  return { kind: "raw", secret: s };
+}
+
+document.getElementById("btnGet").onclick = () => {
+  const name = document.getElementById("inName").value.trim();
+  if (!name) { alert("请填写账号名"); return; }
+  activeName = name;
+  send("GET " + name);
+};
+
+document.getElementById("btnList").onclick = () => {
+  refreshList();
+};
+
+// ---- Passkey 凭证管理 ----
+function refreshWaList() {
+  if (busy) return;
+  pendingWaList = [];
+  document.getElementById("waListBox").innerHTML = '<div class="sub">加载中…</div>';
+  send("WA_LIST");
+}
+
+function renderWaList(items) {
+  const box = document.getElementById("waListBox");
+  if (!items.length) {
+    box.innerHTML = '<div class="sub">（设备上还没有任何 Passkey 凭证）</div>';
+    return;
+  }
+  box.innerHTML = items.map(row => {
+    const p = row.split("\t");
+    const id = p[0] || "";
+    const rp = p[1] || "";
+    const user = p[2] || "";
+    const shortId = id.slice(0, 8) + "…" + id.slice(-4);
+    return `
+    <div class="entry" style="flex-direction:column;align-items:stretch;gap:4px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span class="name">🔐 ${rp}</span>
+        <button class="del" data-wadel="${id}">🗑️</button>
+      </div>
+      <div class="sub" style="font-size:12px;margin:0">用户：${user || "（无）"} · ID：${shortId}</div>
+    </div>`;
+  }).join("");
+  box.querySelectorAll("button[data-wadel]").forEach(btn => {
+    btn.onclick = async () => {
+      const id = btn.dataset.wadel;
+      if (!confirm("确定删除凭证 " + id.slice(0,8) + "…？")) return;
+      const r = await ask("WA_DEL " + id, "deleted", 3000);
+      if (r) { log("✅ 已删除凭证", "ok"); refreshWaList(); }
+      else { log("❌ 删除失败", "err"); alert("删除失败（未解锁或不存在）"); }
+    };
+  });
+}
+
+document.getElementById("btnWaList").onclick = () => refreshWaList();
+document.getElementById("btnWaWipe").onclick = async () => {
+  if (!confirm("⚠️ 确定清空设备上所有 Passkey 凭证？此操作不可恢复！\n\n（注意：仅移除设备的密钥记录，已注册的网站不会自动注销）")) return;
+  const r = await ask("WA_WIPE", "wiped", 3000);
+  if (r) { log("✅ 已清空全部凭证", "ok"); refreshWaList(); }
+  else { log("❌ 清空失败", "err"); }
+};
+
+// ---- 密码 / 特权操作 ----
+document.getElementById("btnPassAuth").onclick = async () => {
+  const pw = document.getElementById("inPass").value;
+  if (!pw) { alert("请输入密码"); return; }
+  const isSet = document.getElementById("passSetRow").dataset.set === "1";
+  let reply;
+  if (!isSet) {
+    reply = await ask("SETPASS " + pw, "pass set", 3000);
+    if (!reply) { log("❌ 设置密码失败", "err"); return; }
+    authed = true;
+    document.getElementById("passSetRow").dataset.set = "1";
+    document.getElementById("btnPassAuth").textContent = "🔓 解锁";
+    log("✅ 密码已设置并解锁", "ok");
+  } else {
+    reply = await ask("AUTHPASS " + pw, "auth ok", 3000);
+    if (!reply) { log("❌ 密码错误", "err"); alert("密码错误"); return; }
+    authed = true;
+    log("✅ 密码验证通过", "ok");
+  }
+  document.getElementById("inPass").value = "";
+  updateGating();
+};
+
+document.getElementById("btnResetPass").onclick = async () => {
+  const oldp = document.getElementById("inPass").value;
+  const newp = prompt("请输入新密码：");
+  if (!oldp || !newp) return;
+  const r = await ask("RESETPASS " + oldp + " " + newp, "pass reset", 3000);
+  if (r) { log("✅ 密码已重置", "ok"); alert("密码已重置"); }
+  else { log("❌ 重置失败（旧密码错误？）", "err"); alert("重置失败"); }
+};
+
+document.getElementById("btnWipe").onclick = async () => {
+  if (!confirm("⚠️ 确定清除设备上所有 TOTP 密钥？\n\n此操作无需密码，用于忘记密码时的应急清除，不可恢复！")) return;
+  const r = await ask("WIPE", "wiped", 3000);
+  if (r) { log("✅ 已清除全部 TOTP", "ok"); refreshList(); }
+  else { log("❌ 清除失败", "err"); alert("清除失败"); }
+};
+
+// ---- 导入 / 导出 ----
+document.getElementById("btnExport").onclick = () => exportBackup();
+document.getElementById("btnImport").onclick = () => document.getElementById("fileImport").click();
+document.getElementById("fileImport").onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => importBackup(reader.result);
+  reader.readAsText(f);
+  e.target.value = "";
+};
+
+// 收集 DUMP 返回的所有条目
+let dumpLines = null;
+function collectDump() {
+  return new Promise((resolve) => {
+    dumpLines = [];
+    send("DUMP");
+    // DUMP 会先输出若干行（每行以 name<TAB>... 形式），最后是 "OK dumped N entries"
+    const check = () => {
+      if (dumpLines === null) { resolve([]); return; }
+      // 等 1.5 秒收集完毕（设备很快，足够）
+      setTimeout(() => {
+        const lines = dumpLines; dumpLines = null;
+        resolve(lines);
+      }, 1500);
+    };
+    setTimeout(check, 200);
+  });
+}
+
+async function exportBackup() {
+  if (!trusted || !authed) { alert("需先解锁"); return; }
+  const lines = await collectDump();
+  if (!lines || !lines.length) { alert("导出为空或未解锁（请先输入密码解锁）"); return; }
+  const items = [];
+  for (const ln of lines) {
+    const p = ln.split("|");
+    // ITEM|name|secret|type|digits|period → 正好 6 段
+    if (p.length !== 6 || p[0] !== "ITEM") continue;
+    const [, name, secret, type, digits, period] = p;
+    if (!name || !secret) continue;
+    const isSteam = type === "1";
+    items.push({
+      name,
+      secret,
+      type: isSteam ? "steam" : "standard",
+      algorithm: "SHA1",
+      digits: parseInt(digits) || (isSteam ? 5 : 6),
+      period: parseInt(period) || 30,
+    });
+  }
+  const backup = {
+    version: "1.0",
+    generator: "ESP TOTP Authenticator",
+    timestamp: new Date().toISOString(),
+    count: items.length,
+    items,
+  };
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `esp-totp-backup-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  log(`✅ 已导出 ${items.length} 条`, "ok");
+  refreshList();
+}
+
+async function importBackup(text) {
+  if (!trusted || !authed) { alert("需先解锁（请输入密码后重试）"); return; }
+  let data;
+  try { data = JSON.parse(text); } catch (e) { alert("JSON 解析失败"); return; }
+  // 兼容两种：{items:[...]} 或 {accounts:{...}} 或单对象
+  let items = [];
+  if (Array.isArray(data.items)) {
+    items = data.items;
+  } else if (data.accounts) {
+    for (const [k, acc] of Object.entries(data.accounts)) {
+      items.push({
+        name: acc.account_name || k,
+        secret: acc.shared_secret || "",
+        type: "steam",
+      });
+    }
+  } else if (data.secret) {
+    items = [data];
+  }
+  if (!items.length) { alert("未找到可导入的条目"); return; }
+
+  if (!confirm(`即将导入 ${items.length} 条密钥，同名条目会被覆盖，继续？`)) return;
+  busy = true;   // 导入期间暂停列表自动刷新
+  log("⏳ 导入中（已暂停自动刷新）...");
+  let ok = 0, fail = 0;
+  const failed = [];
+  for (const it of items) {
+    let name = it.name || "item";
+    // 密钥去掉所有空白（base32/base64 分组或末尾空格都会导致解码失败）
+    let secret = (it.secret || "").replace(/\s+/g, "");
+    let isSteam = it.type === "steam" || /^steam:/i.test(name);
+    if (!secret) { fail++; failed.push(name + "(空密钥)"); continue; }
+    let finalName = name;
+    if (isSteam && !/^steam:/i.test(finalName)) finalName = "steam:" + finalName;
+    const digits = it.digits || (isSteam ? 5 : 6);
+    const period = it.period || 30;
+    const cmd = isSteam
+      ? `ADD ${finalName} ${secret}`
+      : `ADD ${finalName} ${secret} ${digits} ${period}`;
+    // 严格串行：重试最多 3 次，必须收到设备确认
+    let done = false;
+    for (let attempt = 0; attempt < 3 && !done; attempt++) {
+      try {
+        const r = await ask(cmd, "added", 3000);
+        if (r && /added/.test(r.raw || "")) { done = true; }
+      } catch (e) { /* 重试 */ }
+      if (!done) await new Promise(res => setTimeout(res, 400));
+    }
+    // 导入成功后立即 GET 验证；若失败（名字被分片切坏），重新 ADD 重试
+    const tryOne = async () => {
+      const chk = await ask("GET " + finalName, "", 2000);
+      return chk && /:/.test(chk.raw || "") && !/invalid secret/.test(chk.raw) && !/not found/.test(chk.raw);
+    };
+    if (done) {
+      let good = await tryOne();
+      for (let retry = 0; retry < 3 && !good; retry++) {
+        await new Promise(res => setTimeout(res, 300));
+        const rr = await ask(cmd, "added", 3000);  // 重新 ADD
+        if (rr && /added/.test(rr.raw || "")) { await new Promise(res => setTimeout(res, 300)); good = await tryOne(); }
+      }
+      if (good) { ok++; log(`✓ ${finalName}`, "ok"); }
+      else { ok++; failed.push(finalName + "(重试仍异常)"); log(`⚠ ${finalName} 重试后仍验码异常`, "err"); }
+    } else {
+      fail++; failed.push(finalName); log(`✗ ${finalName} 导入失败`, "err");
+    }
+    await new Promise(res => setTimeout(res, 400)); // 包间隔
+  }
+  busy = false;   // 恢复自动刷新
+  const msg = `导入完成：成功 ${ok} 条` + (fail ? `，失败 ${fail} 条` : "")
+    + (failed.length ? `\n异常：${failed.join(", ")}` : "");
+  log("✅ " + msg, ok ? "ok" : "err");
+  alert(msg);
+  refreshList();
+}
+
+</script>
+</body>
+</html>
