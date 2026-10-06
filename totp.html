@@ -190,11 +190,12 @@ let rxBuf = "";
 let timer = null;
 const logEl = document.getElementById("log");
 
-// ---- CA 信任链配置 ----
-// 电脑 CA 公钥（P-256 未压缩点，base64，65 字节）。
-// 由 tools/atri-ca.py init 生成后用 `atri-ca.py capub` 打印，粘到这里。
-// 公钥公开安全：没有 CA 私钥就签不出能被验过的证书。
-const CA_PUBKEY_B64 = "BO+1Mjj2ZeglAd76ArgCaujE0FdBr+TURI6nlaMaAYAN7pZN04F3yhqzxGhDalco5cGMqSdVtgUT9Tu4iFbG9Q0=";
+// ---- CA 信任链配置（SSL/TLS 式：根CA → 中间CA → 设备）----
+// 根 CA 公钥（P-256 未压缩点，base64，65 字节）。
+// 由 tools/atri-ca.py root-init 生成后用 `atri-ca.py root-pub` 打印，粘到这里。
+// 公钥公开安全：没有根 CA 私钥就签不出能被验过的证书。
+// 验签全程离线：不写死域名/IP、不联网。
+const ROOT_CA_PUBKEY_B64 = "BO+1Mjj2ZeglAd76ArgCaujE0FdBr+TURI6nlaMaAYAN7pZN04F3yhqzxGhDalco5cGMqSdVtgUT9Tu4iFbG9Q0=";
 
 let trusted = false;      // 设备是否已通过验签
 let authed = false;       // 密码是否已通过
@@ -249,33 +250,55 @@ document.getElementById("btnConnect").onclick = async () => {
 // ---- CA 信任链：验签设备 + 挑战响应 ----
 async function verifyDevice() {
   try {
-    // 1. 取设备证书
+    // 1. 取设备证书（GETCERT 可能返回两段：“设备证书|中间CA证书”）
     const certReply = await ask("GETCERT", "CERT:", 3000);
     if (!certReply) {
       trusted = false;
       setTrust(false, "设备未安装证书（需先用电脑 CA 签发）");
       return false;
     }
-    const certB64 = certReply.raw.split("CERT:")[1].trim();
-    const cert = base64ToBytes(certB64);
+    const certRaw = certReply.raw.split("CERT:")[1].trim();
+    // 按 '|' 拆链：两段 = 两级链；一段 = 单 CA 模式
+    const parts = certRaw.split("|").filter(s => s.length > 0);
+    const cert = base64ToBytes(parts[0]);
     // 证书格式: len(2) || payload || siglen(2) || sig(64)
     const plen = (cert[0] << 8) | cert[1];
     const payload = cert.slice(2, 2 + plen);
     const slen = (cert[2 + plen] << 8) | cert[2 + plen + 1];
     const sig = cert.slice(4 + plen, 4 + plen + slen);
-    const devicePub = payload.slice(1, 66); // 0x04||X||Y
 
-    // 2. 用 CA 公钥验签证书
-    const caPub = await crypto.subtle.importKey(
-      "raw", base64ToBytes(CA_PUBKEY_B64).slice(0, 65),
-      { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    const okCert = await crypto.subtle.verify(
-      { name: "ECDSA", hash: "SHA-256" }, caPub, sig, payload);
-    if (!okCert) {
+    // 解析 payload（兼容 0x01/0x02）
+    const parsed = parseCertPayload(payload);
+    if (!parsed) {
       trusted = false;
-      setTrust(false, "证书验签失败！非本 CA 签发的设备（可能被伪造）");
-      log("❌ 证书验签失败！拒绝连接（防中间人）", "err");
+      setTrust(false, "证书 payload 格式异常");
       return false;
+    }
+    const { deploymentId, devicePub } = parsed;
+
+    // 2. 验签（全程离线，仅用内置根 CA 公钥）：
+    //    - 两段链：根CA公钥→验中间CA证书→取中间CA公钥→验设备证书
+    //    - 单段：直接用根 CA 公钥验设备证书
+    if (parts.length >= 2) {
+      const okChain = await verifyChain(cert, base64ToBytes(parts[1]));
+      if (!okChain) {
+        trusted = false;
+        setTrust(false, "证书链验签失败！非可信 CA 签发的设备（可能被伪造）");
+        log("❌ 证书链验签失败！拒绝连接（防中间人）", "err");
+        return false;
+      }
+    } else {
+      const caPub = await crypto.subtle.importKey(
+        "raw", base64ToBytes(ROOT_CA_PUBKEY_B64).slice(0, 65),
+        { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+      const okCert = await crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-256" }, caPub, sig, payload);
+      if (!okCert) {
+        trusted = false;
+        setTrust(false, "证书验签失败！非可信 CA 签发的设备（可能被伪造）");
+        log("❌ 证书验签失败！拒绝连接（防中间人）", "err");
+        return false;
+      }
     }
 
     // 3. 挑战-响应：验证设备确实持有私钥
@@ -289,10 +312,6 @@ async function verifyDevice() {
     const sigB64 = authReply.raw.split("SIG:")[1].trim();
     const devKey = await crypto.subtle.importKey(
       "raw", devicePub, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    // 诊断：打印网页验签时实际使用的字节
-    log("🔍 pub=" + bytesToHex(devicePub));
-    log("🔍 nonce=" + bytesToHex(nonce));
-    log("🔍 sig=" + bytesToHex(base64ToBytes(sigB64)));
     const okAuth = await crypto.subtle.verify(
       { name: "ECDSA", hash: "SHA-256" }, devKey,
       base64ToBytes(sigB64), nonce.buffer);
@@ -303,13 +322,27 @@ async function verifyDevice() {
       return false;
     }
 
-    // 4. 设备可信
+    // 4. 弹窗展示内嵌的部署标识，让用户确认“这是我自己部署的设备”
+    const shownId = deploymentId || "(无 — 旧格式证书)";
+    const okDeploy = window.confirm(
+      "设备已通过 CA 验证。\n\n" +
+      "部署标识（内嵌于证书）:\n" + shownId + "\n\n" +
+      "这是你自己部署的设备吗？");
+    if (!okDeploy) {
+      trusted = false;
+      setTrust(false, "用户未确认设备归属，已拒绝连接");
+      log("⚠️ 用户拒绝确认部署标识，断开连接", "err");
+      try { device && device.gatt && device.gatt.connected && device.gatt.disconnect(); } catch (e) {}
+      return false;
+    }
+
+    // 5. 设备可信
     trusted = true;
-    log("🔒 设备身份验证通过（CA 验签 + 挑战响应）", "ok");
+    log("🔒 设备身份验证通过（CA 验签 + 挑战响应），部署标识: " + shownId, "ok");
     document.getElementById("caBanner").classList.remove("hidden");
     document.getElementById("caBanner").className = "card ok-banner";
 
-    // 5. 查询密码是否已设置，决定 UI 显示哪种模式
+    // 6. 查询密码是否已设置，决定 UI 显示哪种模式
     const passReply = await ask("HASPASS", "pass ", 2000);
     const passSet = passReply && passReply.raw && passReply.raw.includes("pass set");
     document.getElementById("passSetRow").dataset.set = passSet ? "1" : "0";
@@ -326,6 +359,70 @@ async function verifyDevice() {
     log("❌ 信任链验证异常: " + e.message, "err");
     return false;
   }
+}
+
+// 解析证书 payload，返回 { deploymentId, devicePub }（兼容 0x01/0x02）
+function parseCertPayload(payload) {
+  try {
+    const ver = payload[0];
+    let deploymentId = "";
+    let off;
+    if (ver === 0x02 || ver === 0x10) {
+      const idLen = payload[1];
+      deploymentId = new TextDecoder().decode(payload.slice(2, 2 + idLen));
+      off = 2 + idLen;
+    } else if (ver === 0x01) {
+      off = 1;
+    } else {
+      return null;
+    }
+    const devicePub = payload.slice(off, off + 65);
+    if (devicePub.length !== 65) return null;
+    return { deploymentId, devicePub, version: ver };
+  } catch (e) {
+    return null;
+  }
+}
+
+// 三级链验签：根CA公钥→验中间CA证书（0x10）→取中间CA公钥→验设备证书（0x02）
+async function verifyChain(deviceCert, userCaCert) {
+  // --- 1) 验中间 CA 证书（用根 CA 公钥）---
+  const ucaPlen = (userCaCert[0] << 8) | userCaCert[1];
+  const ucaPayload = userCaCert.slice(2, 2 + ucaPlen);
+  const ucaSlen = (userCaCert[2 + ucaPlen] << 8) | userCaCert[2 + ucaPlen + 1];
+  const ucaSig = userCaCert.slice(4 + ucaPlen, 4 + ucaPlen + ucaSlen);
+  const ucaParsed = parseCertPayload(ucaPayload);
+  if (!ucaParsed || ucaParsed.version !== 0x10) {
+    log("❌ 中间 CA 证书格式异常", "err");
+    return false;
+  }
+  const rootPub = await crypto.subtle.importKey(
+    "raw", base64ToBytes(ROOT_CA_PUBKEY_B64).slice(0, 65),
+    { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  const okUca = await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, rootPub, ucaSig, ucaPayload);
+  if (!okUca) {
+    log("❌ 中间 CA 证书验签失败：非本根 CA 签发", "err");
+    return false;
+  }
+  const userCaPub = ucaParsed.devicePub; // 中间 CA 公钥
+  log("🔗 中间 CA 证书验签通过（根 CA 可信），部署标识: " + (ucaParsed.deploymentId || "(无)"), "ok");
+
+  // --- 2) 验设备证书（用中间 CA 公钥）---
+  const dPlen = (deviceCert[0] << 8) | deviceCert[1];
+  const dPayload = deviceCert.slice(2, 2 + dPlen);
+  const dSlen = (deviceCert[2 + dPlen] << 8) | deviceCert[2 + dPlen + 1];
+  const dSig = deviceCert.slice(4 + dPlen, 4 + dPlen + dSlen);
+  const userCaKey = await crypto.subtle.importKey(
+    "raw", userCaPub, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  const okDev = await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, userCaKey, dSig, dPayload);
+  if (!okDev) {
+    log("❌ 设备证书验签失败：非中间 CA 签发", "err");
+    return false;
+  }
+  log("🔗 设备证书验签通过（中间 CA 可信）", "ok");
+  return true;
 }
 
 function setTrust(ok, msg) {

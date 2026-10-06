@@ -140,7 +140,8 @@ console.log('HDKey.fromMasterSeed:', typeof HDKey.fromMasterSeed);
 const SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const RX  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const TX  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-const CA_PUBKEY_B64 = "BO+1Mjj2ZeglAd76ArgCaujE0FdBr+TURI6nlaMaAYAN7pZN04F3yhqzxGhDalco5cGMqSdVtgUT9Tu4iFbG9Q0=";
+const ROOT_CA_PUBKEY_B64 = "BO+1Mjj2ZeglAd76ArgCaujE0FdBr+TURI6nlaMaAYAN7pZN04F3yhqzxGhDalco5cGMqSdVtgUT9Tu4iFbG9Q0=";
+// SSL/TLS 式三级链：根CA公钥→验中间CA证书→验设备证书。验签全程离线，不写死域名/IP、不联网。
 // 测试网：bc1 改成 tb1 网络。这里默认 bitcoin mainnet，可切换。
 let NETWORK = "bitcoin";
 
@@ -159,6 +160,60 @@ function setStatus(t, on) {
 }
 function b64ToBytes(b64) { const b = atob(b64); const a = new Uint8Array(b.length); for (let i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
 function bytesToB64(b) { let s=""; b.forEach(x=>s+=String.fromCharCode(x)); return btoa(s); }
+
+// 解析证书 payload，返回 { deploymentId, devicePub }（兼容 0x01/0x02）
+function parseCertPayload(payload) {
+  try {
+    const ver = payload[0];
+    let deploymentId = "";
+    let off;
+    if (ver === 0x02 || ver === 0x10) {
+      const idLen = payload[1];
+      deploymentId = new TextDecoder().decode(payload.slice(2, 2 + idLen));
+      off = 2 + idLen;
+    } else if (ver === 0x01) {
+      off = 1;
+    } else {
+      return null;
+    }
+    const devicePub = payload.slice(off, off + 65);
+    if (devicePub.length !== 65) return null;
+    return { deploymentId, devicePub, version: ver };
+  } catch (e) {
+    return null;
+  }
+}
+
+// 三级链验签（全程离线，仅用内置根 CA 公钥）：根CA公钥→验中间CA证书（0x10）→取中间CA公钥→验设备证书（0x02）
+async function verifyChain(deviceCert, userCaCert) {
+  const ucaPlen = (userCaCert[0] << 8) | userCaCert[1];
+  const ucaPayload = userCaCert.slice(2, 2 + ucaPlen);
+  const ucaSlen = (userCaCert[2 + ucaPlen] << 8) | userCaCert[2 + ucaPlen + 1];
+  const ucaSig = userCaCert.slice(4 + ucaPlen, 4 + ucaPlen + ucaSlen);
+  const ucaParsed = parseCertPayload(ucaPayload);
+  if (!ucaParsed || ucaParsed.version !== 0x10) { log("❌ 中间 CA 证书格式异常", "err"); return false; }
+  const rootPub = await crypto.subtle.importKey(
+    "raw", b64ToBytes(ROOT_CA_PUBKEY_B64).slice(0, 65),
+    { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  const okUca = await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, rootPub, ucaSig, ucaPayload);
+  if (!okUca) { log("❌ 中间 CA 证书验签失败：非本根 CA 签发", "err"); return false; }
+  const userCaPub = ucaParsed.devicePub;
+  log("🔗 中间 CA 证书验签通过，部署标识: " + (ucaParsed.deploymentId || "(无)"), "ok");
+
+  const dPlen = (deviceCert[0] << 8) | deviceCert[1];
+  const dPayload = deviceCert.slice(2, 2 + dPlen);
+  const dSlen = (deviceCert[2 + dPlen] << 8) | deviceCert[2 + dPlen + 1];
+  const dSig = deviceCert.slice(4 + dPlen, 4 + dPlen + dSlen);
+  const userCaKey = await crypto.subtle.importKey(
+    "raw", userCaPub, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  const okDev = await crypto.subtle.verify(
+    { name: "ECDSA", hash: "SHA-256" }, userCaKey, dSig, dPayload);
+  if (!okDev) { log("❌ 设备证书验签失败：非中间 CA 签发", "err"); return false; }
+  log("🔗 设备证书验签通过（中间 CA 可信）", "ok");
+  return true;
+}
+
 function bytesToHexW(b) { return Array.from(b).map(x=>x.toString(16).padStart(2,"0")).join(""); }
 function hexToBytes(hex) { hex=hex.trim().replace(/^0x/,""); const a=new Uint8Array(hex.length/2); for(let i=0;i<a.length;i++) a[i]=parseInt(hex.substr(i*2,2),16); return a; }
 
@@ -233,17 +288,30 @@ async function verifyDevice() {
   try {
     const certReply = await ask("GETCERT", "CERT:", 3000);
     if (!certReply) { setStatus("设备无证书", false); return; }
-    const certB64 = certReply.raw.split("CERT:")[1].trim();
-    const cert = b64ToBytes(certB64);
+    const certRaw = certReply.raw.split("CERT:")[1].trim();
+    // 按 '|' 拆链：两段 = 三级链（设备证书|中间CA证书）；一段 = 单段模式
+    const parts = certRaw.split("|").filter(s => s.length > 0);
+    const cert = b64ToBytes(parts[0]);
     const plen = (cert[0]<<8)|cert[1];
     const payload = cert.slice(2, 2+plen);
     const slen = (cert[2+plen]<<8)|cert[2+plen+1];
     const sig = cert.slice(4+plen, 4+plen+slen);
-    const devicePub = payload.slice(1, 66);
-    const caPub = await crypto.subtle.importKey("raw", b64ToBytes(CA_PUBKEY_B64).slice(0,65),
-      { name:"ECDSA", namedCurve:"P-256" }, false, ["verify"]);
-    const okCert = await crypto.subtle.verify({name:"ECDSA",hash:"SHA-256"}, caPub, sig, payload);
-    if (!okCert) { setStatus("⚠️ 证书验签失败", false); log("❌ 证书验签失败！拒绝连接", "err"); return; }
+
+    // 解析 payload（兼容 0x01/0x02）
+    const parsed = parseCertPayload(payload);
+    if (!parsed) { setStatus("证书格式异常", false); return; }
+    const { deploymentId, devicePub } = parsed;
+
+    // 验签（全程离线，仅用内置根 CA 公钥）：两段链 → 根CA→中间CA→设备；单段 → 直接用根 CA 公钥验
+    if (parts.length >= 2) {
+      const okChain = await verifyChain(cert, b64ToBytes(parts[1]));
+      if (!okChain) { setStatus("⚠️ 证书链验签失败", false); log("❌ 证书链验签失败！拒绝连接", "err"); return; }
+    } else {
+      const caPub = await crypto.subtle.importKey("raw", b64ToBytes(ROOT_CA_PUBKEY_B64).slice(0,65),
+        { name:"ECDSA", namedCurve:"P-256" }, false, ["verify"]);
+      const okCert = await crypto.subtle.verify({name:"ECDSA",hash:"SHA-256"}, caPub, sig, payload);
+      if (!okCert) { setStatus("⚠️ 证书验签失败", false); log("❌ 证书验签失败！拒绝连接", "err"); return; }
+    }
     const nonce = crypto.getRandomValues(new Uint8Array(32));
     const authReply = await ask("AUTH " + bytesToB64(nonce), "SIG:", 3000);
     if (!authReply) { setStatus("挑战无响应", false); return; }
@@ -251,9 +319,22 @@ async function verifyDevice() {
     const okAuth = await crypto.subtle.verify({name:"ECDSA",hash:"SHA-256"}, devKey,
       b64ToBytes(authReply.raw.split("SIG:")[1].trim()), nonce.buffer);
     if (!okAuth) { setStatus("⚠️ 挑战响应失败", false); return; }
+
+    // 弹窗展示内嵌的部署标识，确认设备归属
+    const shownId = deploymentId || "(无 — 旧格式证书)";
+    const okDeploy = window.confirm(
+      "设备已通过 CA 验证。\n\n部署标识（内嵌于证书）:\n" + shownId +
+      "\n\n这是你自己部署的设备吗？");
+    if (!okDeploy) {
+      setStatus("用户未确认设备归属", false);
+      log("⚠️ 用户拒绝确认部署标识，断开连接", "err");
+      try { device && device.gatt && device.gatt.connected && device.gatt.disconnect(); } catch(e) {}
+      return;
+    }
+
     trusted = true;
     setStatus("🔒 设备已验证", true);
-    log("🔒 设备身份验证通过", "ok");
+    log("🔒 设备身份验证通过，部署标识: " + shownId, "ok");
     document.getElementById("passArea").classList.remove("hidden");
     const has = await ask("HASPASS", "pass ", 2000);
     document.getElementById("btnUnlock").textContent = (has && /pass set/.test(has.raw)) ? "🔓 解锁" : "🔐 设置密码";
