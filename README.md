@@ -1,6 +1,6 @@
 # ESP Physical Auth · Web
 
-ATRI 物理认证器的配套 Web 应用。全部为静态 HTML，通过 Web Bluetooth 与 ESP32-C5 硬件通信，无需后端服务器。
+ATRI 物理认证器的配套 Web 应用。全部为静态 HTML，通过 Web Bluetooth 与 ESP32 硬件通信，无需后端服务器。
 
 ## 组成
 
